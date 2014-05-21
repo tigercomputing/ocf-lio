@@ -1,0 +1,263 @@
+#!/bin/sh
+################################################################################
+#
+# OCF resource agent to manage a Linux-IO backing LUN
+# Copyright (c) 2014 Linn Products Ltd.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+################################################################################
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+
+TCM_SYSFS=/sys/kernel/config/target/core
+ISCSI=/sys/kernel/config/target/iscsi
+
+#####################################################
+
+# Listen to 0.0.0.0:3260 by default
+OCF_RESKEY_portals_default="0.0.0.0:3260"
+: ${OCF_RESKEY_portals=${OCF_RESKEY_portals_default}}
+
+iscsi_meta_data()
+{
+    cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="iscsi">
+<version>1.0</version>
+<longdesc lang="en">
+The iscsi resource manages a Linux-IO (LIO) iSCSI Target
+including LUN ACL mapping.
+</longdesc>
+<shortdesc lang="en">
+Linux-IO iSCSI Target
+</shortdesc>
+
+<parameters>
+
+<parameter name="iqn" required="1" unique="0">
+<longdesc lang="en">
+The target iSCSI Qualified Name (IQN). Should follow the conventional
+"iqn.yyyy-mm.&lt;reversed domain name&gt;[:identifier]" syntax.
+</longdesc>
+<shortdesc lang="en">iSCSI target IQN</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="portals" required="0" unique="0">
+<longdesc lang="en">
+iSCSI network portal addresses. if unset, the default is
+to create a portal that listens on ${OCF_RESKEY_portals_default}.
+</longdesc>
+<shortdesc lang="en">iSCSI Portal addresses</shortdesc>
+<content type="string" default="{OCF_RESKEY_portals_default}"/>
+</parameter>
+
+<parameter name="initiators" required="1" unique="0">
+<longdesc lang="en">
+Allowed initiators. A space-separated list of initiators allowed to
+connect to this target. Initiators may be listed in any syntax
+the LIO target implementation allows.
+</longdesc>
+<shortdesc lang="en">List of iSCSI initiators allowed to connect to this target</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="luns" required="1" unique="0">
+<longdesc lang="en">
+The logical units to create as part of this target. Each logical unit is
+specified as a LUN NAME=LUN ID pair. Separate multiple logical units with spaces. Use
+bash syntax to escape special characters.
+</longdesc>
+<shortdesc lang="en">Logical Units</shortdesc>
+<content type="string" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start" timeout="40" />
+<action name="stop" timeout="10" />
+<action name="status" timeout="10" interval="10" />
+<action name="monitor" timeout="10" interval="10" />
+<action name="meta-data" timeout="5" />
+<action name="validate-all" timeout="10" />
+</actions>
+
+</resource-agent>
+END
+}
+
+iscsi_methods()
+{
+    cat <<-!
+    start
+    stop
+    status
+    monitor
+    meta-data
+    validate-all
+!
+}
+
+iscsi_usage()
+{
+    cat <<END
+    usage: $0 {start|stop|status|monitor|meta-data|validate-all}
+END
+}
+
+find_hbadev()
+{
+    local hba_list
+    local hba
+    local hbadev
+
+    #FIXME: hard coded to look for iblock right now
+
+    # list all HBAs of the configured type
+    hba_list=$(ls -1 $TCM_SYSFS | egrep "^iblock_[0-9]+$")
+
+    for hba in $hba_list; do
+        hbadev="${hba}/${lun_name}"
+        if [ -d "${TCM_SYSFS}/${hbadev}" ]; then
+            echo "${hbadev}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+#OCF_RESKEY_portals
+#OCF_RESKEY_iqn
+#OCF_RESKEY_initiators
+#OCF_RESKEY_luns
+
+iscsi_monitor()
+{
+    # if target_core_mod isn't loaded, we can't be running
+    [ -e /sys/kernel/config/target/version ] || return $OCF_NOT_RUNNING
+
+    # if IQN does not exist we can't be running
+    [ -e /sys/kernel/config/target/iscsi/${OCF_RESKEY_iqn} ] || return $OCF_NOT_RUNNING
+    return $OCF_SUCCESS
+}
+
+iscsi_status()
+{
+    # just call through to monitor
+    iscsi_monitor
+}
+
+iscsi_start()
+{
+    # check if we have anything to do
+    iscsi_monitor; rc=$?
+    if [ $rc -eq $OCF_SUCCESS ]; then
+        ocf_log info "Resource is already running"
+        return $OCF_SUCCESS
+    fi
+
+    # load target_core_mod if it isn't already
+    if ! [ -e /sys/kernel/config/target/version ]; then
+        ocf_run modprobe target_core_mod; rc=$?
+        if [ $rc -ne 0 ]; then
+            return $OCF_ERR_GENERIC
+        fi
+    fi
+
+    # create the iSCSI Target Portal. This should also
+    # generate the default target port group.
+
+    for portal in ${OCF_RESKEY_portals}; do
+        ocf_run lio_node --addnp ${OCF_RESKEY_iqn} 1 \
+            ${portal} || return $OCF_ERR_GENERIC
+    done
+
+    # add node ACL for each initiator target port group
+    for initiator in ${OCF_RESKEY_initiators}; do
+        ocf_run lio_node --addnodeacl ${OCF_RESKEY_iqn} 1 \
+            ${initiator} || return $OCF_ERR_GENERIC
+    done
+
+    ## FIXME: support authentication - disabled for now
+    ocf_run lio_node --disableauth ${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
+
+    ## FIXME: add support for params
+    
+    for lun in ${OCF_RESKEY_luns}; do
+        lun_name=${lun%%=*}
+        lun_id=${lun#*=}
+
+        hbadev=$(find_hbadev)
+
+        if [ -z "$hbadev" ]; then
+            ocf_log err "HBA device does not exist"
+            return $OCF_ERR_GENERIC
+        fi
+
+        ocf_run lio_node --addlun=${OCF_RESKEY_iqn} 1 ${lun_id} \
+            ${lun_name} ${hbadev} || return $OCF_ERR_GENERIC
+                for initiator in ${OCF_RESKEY_initiators}; do
+                    ocf_run lio_node --addlunacl=${OCF_RESKEY_iqn} 1 \
+                        ${initiator} ${lun_id} ${lun_id} || return $OCF_ERR_GENERIC
+                done
+    done
+
+    ## Enable TPG group after LUNS are enabled.
+    if [ "$(cat "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1/enable")" -ne 1 ]; then
+        ocf_run lio_node --enabletpg=${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
+    fi
+
+    return $OCF_SUCCESS
+}
+
+iscsi_stop()
+{
+    # if target_core_mod isn't loaded, we can't be running
+    [ -e /sys/kernel/config/target/version ] || return $OCF_SUCCESS
+
+    return $OCF_SUCCESS
+
+}
+
+iscsi_validate_all()
+{
+    # ensure configfs is mounted
+    if [ ! -d /sys/kernel/config ]; then
+            ocf_run modprobe configfs; rc=$?
+               if [ $rc - ne 0 ]; then
+                    ocf_log err "unable to load the configfs module"
+                    return $OCF_ERR_INSTALLED
+               fi
+    fi
+
+    if ! grep -q '/sys/kernel/config configfs' /proc/mounts; then
+            ocf_run mount -t configfs configfs /sys/kernel/config; rc=$?
+            if [ $rc - ne 0]; then
+                ocf_log err "Unable to mount configfs on /sys/kernel/config"
+                return $OCF_ERR_INSTALLED
+            fi
+    fi
+
+    return $OCF_SUCCESS
+}
+
+OCF_REQUIRED_PARAMS="iqn initiators luns"
+OCF_REQUIRED_BINARIES="lio_node"
+ocf_rarun $*
+
