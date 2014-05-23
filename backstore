@@ -25,10 +25,10 @@
 
 TCM_SYSFS=/sys/kernel/config/target/core
 HBA_MAX=255 # arbitrary high limit
+MULTISTATE=0 # set from backstore_validate_all()
+ALUA_PTGP=default_tg_pt_gp
 
 ################################################################################
-
-# FIXME: Add ALUA and master/slave support
 
 backstore_meta_data() {
 	cat <<END
@@ -171,16 +171,37 @@ find_hbadev()
 set_alua()
 {
 	local hbadev="$1"
-	local ptgp="$2"
-	local prop="$3"
-	local value="$4"
+	local prop="$2"
+	local value="$3"
 
-	echo "$value" > "${TCM_SYSFS}/${hbadev}/alua/${ptgp}/${prop}"
+	echo "$value" > "${TCM_SYSFS}/${hbadev}/alua/${ALUA_PTGP}/${prop}"
 }
 
-backstore_monitor()
+get_alua()
+{
+	local hbadev="$1"
+	local prop="$2"
+
+	cat "${TCM_SYSFS}/${hbadev}/alua/${ALUA_PTGP}/${prop}"
+}
+
+set_master_score()
+{
+	# Use quiet mode (-Q) to quench logging. Actual score updates
+	# will get logged by attrd anyway
+	ocf_run ${HA_SBIN_DIR}/crm_master -Q -l reboot -v $1
+}
+
+remove_master_score()
+{
+	ocf_run ${HA_SBIN_DIR}/crm_master -l reboot -D
+}
+
+backstore_status()
 {
 	local hbadev
+	local alua_state
+	local alua_pref
 
 	# If target_core_mod isn't loaded, we can't be running
 	[ -e /sys/kernel/config/target/version ] || return $OCF_NOT_RUNNING
@@ -199,13 +220,37 @@ backstore_monitor()
 		return $OCF_ERR_GENERIC
 	fi
 
-	return $OCF_SUCCESS
+	# If this isn't a multistate resource, we're done
+	[ $MULTISTATE -eq 0 ] && return $OCF_SUCCESS
+
+	alua_state="$(get_alua "$hbadev" alua_access_state)"
+	alua_pref="$(get_alua "$hbadev" preferred)"
+
+	if [ "$alua_state" -eq 0 ] && [ "$alua_pref" -eq 1 ]; then
+		return $OCF_RUNNING_MASTER
+	elif [ "$alua_state" -eq 1 ] && [ "$alua_pref" -eq 0 ]; then
+		return $OCF_SUCCESS # slave
+	else
+		return $OCF_FAILED_MASTER
+	fi
 }
 
-backstore_status()
+backstore_monitor()
 {
-	# just call through to monitor
-	backstore_monitor
+	local rc
+
+	backstore_status; rc=$?
+
+	case $rc in
+	$OCF_SUCCESS|$OCF_RUNNING_MASTER)
+		set_master_score 1000
+		;;
+	$OCF_NOT_RUNNING)
+		remove_master_score
+		;;
+	esac
+
+	return $rc
 }
 
 backstore_start()
@@ -214,7 +259,6 @@ backstore_start()
 	local hba_idx
 	local hba
 	local hbadev
-	local alua_ptgp
 	local attr
 
 	# Check if we have anything to do
@@ -239,7 +283,7 @@ backstore_start()
 		hba=""
 	done
 
-	if [ -z "${hba}" ]; then
+	if [ -z "$hba" ]; then
 		ocf_log err "Could not allocate a new HBA: no free indexes"
 		return $OCF_ERR_GENERIC
 	fi
@@ -255,15 +299,42 @@ backstore_start()
 	ocf_run tcm_node --setunitserialwithmd "$hbadev" "$OCF_RESKEY_unit_serial"; rc=$?
 	[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 
-	# FIXME: Establish ALUA properly
-	alua_ptgp=default_tg_pt_gp
-	ocf_run tcm_node --addaluatpgwithmd "$hbadev" "$alua_ptgp" 0; rc=$?
+	# Establish ALUA Target Port Group
+	ocf_run tcm_node --addaluatpgwithmd "$hbadev" "$ALUA_PTGP" 0; rc=$?
 	[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 
-	set_alua "$hbadev" "$alua_ptgp" alua_access_type 0 || return $OCF_ERR_GENERIC
-	set_alua "$hbadev" "$alua_ptgp" preferred 0 || return $OCF_ERR_GENERIC
-	set_alua "$hbadev" "$alua_ptgp" nonop_delay_msecs 100 || return $OCF_ERR_GENERIC
-	set_alua "$hbadev" "$alua_ptgp" trans_delay_msecs 0 || return $OCF_ERR_GENERIC
+	if [ $MULTISTATE -eq 0 ]; then
+		ocf_log debug "Setting ALUA type to none"
+
+		# Single-state LUN, no ALUA needed
+		ocf_run tcm_node --setaluatype="$hbadev" "$ALUA_PTGP" none \
+			|| return $OCF_ERR_GENERIC
+		ocf_run tcm_node --clearaluapref="$hbadev" "$ALUA_PTGP" \
+			|| return $OCF_ERR_GENERIC
+		set_alua "$hbadev" nonop_delay_msecs 100 \
+			|| return $OCF_ERR_GENERIC
+		set_alua "$hbadev" trans_delay_msecs 0 \
+			|| return $OCF_ERR_GENERIC
+	else
+		# Multi-state LUN, use ALUA. The RA should always start in
+		# "slave" mode and be promoted to master by Pacemaker.
+
+		ocf_log debug "Setting ALUA type to implicit"
+
+		# Set Implicit only access type (cannot be set by initiator)
+		ocf_run tcm_node --setaluatype="$hbadev" "$ALUA_PTGP" implict \
+			|| return $OCF_ERR_GENERIC
+		ocf_run tcm_node --clearaluapref="$hbadev" "$ALUA_PTGP" \
+			|| return $OCF_ERR_GENERIC
+		set_alua "$hbadev" nonop_delay_msecs 100 \
+			|| return $OCF_ERR_GENERIC
+		set_alua "$hbadev" trans_delay_msecs 0 \
+			|| return $OCF_ERR_GENERIC
+
+		# Active/NonOptimized # XXX: custom slave state?
+		ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" a \
+			|| return $OCF_ERR_GENERIC
+	fi
 
 	# Set attributes
 	for attrib in ${OCF_RESKEY_attrib}; do
@@ -272,6 +343,8 @@ backstore_start()
 		echo "$val" > "${TCM_SYSFS}/${hbadev}/attrib/${var}"; rc=$?
 		[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 	done
+
+	[ $MULTISTATE -eq 1 ] && set_master_score 1000
 
 	return $OCF_SUCCESS
 }
@@ -283,12 +356,16 @@ backstore_stop()
 	local rc
 
 	# If target_core_mod isn't loaded, we can't be running
-	[ -e /sys/kernel/config/target/version ] || return $OCF_SUCCESS
+	if ! [ -e /sys/kernel/config/target/version ]; then
+		remove_master_score
+		return $OCF_SUCCESS
+	fi
 
 	# Try to find an HBA containing this device
 	hbadev=$(find_hbadev)
 	if [ -z "$hbadev" ]; then
 		ocf_log info "Resource is already stopped"
+		remove_master_score
 		return $OCF_SUCCESS
 	fi
 
@@ -302,27 +379,133 @@ backstore_stop()
 	# device in place.
 	ocf_run tcm_node --delhba $hba; rc=$?
 	if [ $rc -ne 0 ]; then
+		remove_master_score
 		return $OCF_ERR_GENERIC
 	fi
 
 	# FIXME: if we are the last to go, clean up and unload modules?
 
+	remove_master_score
 	return $OCF_SUCCESS
 }
 
 backstore_promote()
 {
-	return $OCF_ERR_UNIMPLEMENTED
+	local hbadev
+	local status
+	local rc=$OCF_ERR_GENERIC
+	local first_try=true
+
+	# Keep trying to promote the resource;
+	# wait for the CRM to time us out if this fails
+	while :; do
+		backstore_monitor; status=$?
+
+		case $status in
+		$OCF_SUCCESS)
+			ocf_log debug "attempting to promote"
+			# We are slave, let's make ourselves master
+
+			hbadev=$(find_hbadev)
+			[ -n "$hbadev" ] || break
+
+			# Active/Optimized
+			ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" o \
+				|| break
+			# Set preferred bit
+			ocf_run tcm_node --setaluapref="$hbadev" "$ALUA_PTGP" \
+				|| break
+			;;
+		$OCF_NOT_RUNNING)
+			ocf_log error "Trying to promote a resource that was not started"
+			break
+			;;
+		$OCF_RUNNING_MASTER)
+			ocf_log debug "promotion successful"
+			rc=$OCF_SUCCESS
+			break
+			;;
+		esac
+
+		$first_try || sleep 1
+		first_try=false
+	done
+
+	# avoid too tight pacemaker driven "recovery" loop,
+	# if promotion keeps failing for some reason
+	if [ $rc != 0 ]; then
+		ocf_log warn "promotion failed; sleeping 15s to prevent tight recovery loop"
+		sleep 15
+	fi
+	return $rc
 }
 
 backstore_demote()
 {
-	return $OCF_ERR_UNIMPLEMENTED
+	local hbadev
+	local status
+	local rc=$OCF_ERR_GENERIC
+	local first_try=true
+
+	# Keep trying to promote the resource;
+	# wait for the CRM to time us out if this fails
+	while :; do
+		backstore_monitor; status=$?
+
+		case $status in
+		$OCF_SUCCESS)
+			ocf_log debug "demotion successful"
+			rc=$OCF_SUCCESS
+			break
+			;;
+		$OCF_NOT_RUNNING)
+			ocf_log error "Trying to demote a resource that was not started"
+			break
+			;;
+		$OCF_RUNNING_MASTER)
+			ocf_log debug "attempting to demote"
+			# We are master, let's make ourselves slave
+
+			hbadev=$(find_hbadev)
+			[ -n "$hbadev" ] || break
+
+			# Active/NonOptimized
+			ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" a \
+				|| break
+			# Clear preferred bit
+			ocf_run tcm_node --clearaluapref="$hbadev" "$ALUA_PTGP" \
+				|| break
+			;;
+		esac
+
+		$first_try || sleep 1
+		first_try=false
+	done
+
+	# avoid too tight pacemaker driven "recovery" loop,
+	# if demotion keeps failing for some reason
+	if [ $rc != 0 ]; then
+		ocf_log warn "demotion failed; sleeping 15s to prevent tight recovery loop"
+		sleep 15
+	fi
+	return $rc
 }
 
 backstore_notify()
 {
-	return $OCF_ERR_UNIMPLEMENTED
+	local n_type=$OCF_RESKEY_CRM_meta_notify_type
+	local n_op=$OCF_RESKEY_CRM_meta_notify_operation
+
+	: "== DEBUG == slave   = $OCF_RESKEY_CRM_meta_notify_slave_uname"
+	: "== DEBUG == master  = $OCF_RESKEY_CRM_meta_notify_master_uname"
+	: "== DEBUG == start   = $OCF_RESKEY_CRM_meta_notify_start_uname"
+	: "== DEBUG == promote = $OCF_RESKEY_CRM_meta_notify_promote_uname"
+	: "== DEBUG == stop    = $OCF_RESKEY_CRM_meta_notify_stop_uname"
+	: "== DEBUG == demote  = $OCF_RESKEY_CRM_meta_notify_demote_uname"
+
+	backstore_monitor
+
+	return $OCF_SUCCESS
 }
 
 backstore_validate_all()
@@ -342,6 +525,9 @@ backstore_validate_all()
 			ocf_log err "Clone options misconfigured. (expect: clone_max=2,clone_node_max=1,master_node_max=1,master_max=1)"
 			return $OCF_ERR_CONFIGURED
 		fi
+
+		ocf_log debug "Running as a multi-state resource"
+		MULTISTATE=1
 	fi
 
 	# ensure ALUA and PR state directories exist
@@ -370,7 +556,7 @@ backstore_validate_all()
 	fi
 
 	# ensure the hba_type is one we know about
-	case "${OCF_RESKEY_hba_type}" in
+	case "$OCF_RESKEY_hba_type" in
 	iblock)
 		if [ ! -b "$OCF_RESKEY_device" ]; then
 			ocf_log err "${OCF_RESKEY_device}: is not a block device"
@@ -388,12 +574,6 @@ backstore_validate_all()
 		return $OCF_ERR_CONFIGURED
 		;;
 	esac
-
-	# FIXME
-	if ocf_is_ms; then
-		ocf_log err "master/slave not yet implemented"
-		return $OCF_ERR_UNIMPLEMENTED
-	fi
 
 	return $OCF_SUCCESS
 }
