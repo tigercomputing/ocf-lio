@@ -148,14 +148,6 @@ backstore_usage() {
 END
 }
 
-#OCF_RESKEY_hba_type
-#OCF_RESKEY_name
-#OCF_RESKEY_unit_serial
-#OCF_RESKEY_attrib
-#
-#hba_index=auto-detected
-# load module(s) if not loaded
-
 find_hbadev()
 {
 	local hba_list
