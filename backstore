@@ -115,6 +115,7 @@ Backing store attributes
 <action name="demote"       timeout="90" />
 <action name="notify"       timeout="90" />
 <action name="stop"         timeout="120" />
+<action name="monitor"      depth="0" timeout="20" interval="10" />
 <action name="monitor"      depth="0" timeout="20" interval="20" role="Slave" />
 <action name="monitor"      depth="0" timeout="20" interval="10" role="Master" />
 <action name="meta-data"    timeout="5" />
