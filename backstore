@@ -197,6 +197,25 @@ remove_master_score()
 	ocf_run ${HA_SBIN_DIR}/crm_master -l reboot -D
 }
 
+# A shell-like implementation of option parsing as found in the Linux kernel
+# input is expected to be a comma-separated string of key=value pairs
+match_opts()
+{
+	local optstr="$1"
+	local match="$2"
+	local opt
+
+	local IFS=','
+	for opt in $optstr; do
+		if [ "${opt%%=*}" = "$match" ]; then
+			echo "${opt#*=}"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
 backstore_status()
 {
 	local hbadev
@@ -558,14 +577,33 @@ backstore_validate_all()
 	# ensure the hba_type is one we know about
 	case "$OCF_RESKEY_hba_type" in
 	iblock)
+		# device is simply a (symlink to a) block device
 		if [ ! -b "$OCF_RESKEY_device" ]; then
 			ocf_log err "${OCF_RESKEY_device}: is not a block device"
 			return $OCF_ERR_CONFIGURED
 		fi
 		;;
 	fileio)
-		if [ ! -e "$OCF_RESKEY_device" ]; then
-			ocf_log err "${OCF_RESKEY_device}: does not exist"
+		# device is a parameter string that can contain multiple options:
+		#   fd_dev_name     path to file on disk
+		#   fd_dev_size     size of file on disk - required for files
+		#                     but ignored/optional for block devices
+		#   fd_buffered_io  whether IO should be buffered - default is
+		#                     unbuffered/synchronous
+		local dev_name="$(match_opts "$OCF_RESKEY_device" fd_dev_name)"
+		local dev_size="$(match_opts "$OCF_RESKEY_device" fd_dev_size)"
+		local buff_io="$(match_opts "$OCF_RESKEY_device" fd_buffered_io)"
+
+		if [ -n "$buff_io" ] && [ "$buff_io" != "1" ]; then
+			ocf_log err "fd_buffered_io must be '1' or not set"
+			return $OCF_ERR_CONFIGURED
+		fi
+
+		if [ -b "$dev_name" ]; then
+			# do nothing, it's an existing block device so
+			# fd_dev_size is ignored
+		elif [ -z "$dev_size" ]; then
+			ocf_log err "fd_dev_size must be given unless fd_dev_name is a block device"
 			return $OCF_ERR_CONFIGURED
 		fi
 		;;
