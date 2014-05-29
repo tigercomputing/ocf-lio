@@ -239,7 +239,7 @@ iscsi_stop()
     ## disable iSCSI  Target port group first
     ## This will block I/O
     if [ -d "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1" ]; then
-        if [ "$(cat "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1/enable")" -ne 1 ]; then
+        if [ "$(cat "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1/enable")" -ne 0 ]; then
             ocf_run lio_node --disabletpg=${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
         fi
     fi
