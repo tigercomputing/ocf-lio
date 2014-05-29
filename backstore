@@ -247,7 +247,7 @@ backstore_status()
 
 	if [ "$alua_state" -eq 0 ] && [ "$alua_pref" -eq 1 ]; then
 		return $OCF_RUNNING_MASTER
-	elif [ "$alua_state" -eq 1 ] && [ "$alua_pref" -eq 0 ]; then
+	elif [ "$alua_state" -eq 2 ] && [ "$alua_pref" -eq 0 ]; then
 		return $OCF_SUCCESS # slave
 	else
 		return $OCF_FAILED_MASTER
@@ -350,8 +350,8 @@ backstore_start()
 		set_alua "$hbadev" trans_delay_msecs 0 \
 			|| return $OCF_ERR_GENERIC
 
-		# Active/NonOptimized # XXX: custom slave state?
-		ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" a \
+		# Standby # XXX: custom slave state?
+		ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" s \
 			|| return $OCF_ERR_GENERIC
 	fi
 
@@ -488,8 +488,8 @@ backstore_demote()
 			hbadev=$(find_hbadev)
 			[ -n "$hbadev" ] || break
 
-			# Active/NonOptimized
-			ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" a \
+			# Standby
+			ocf_run tcm_node --setaluastate="$hbadev" "$ALUA_PTGP" s \
 				|| break
 			# Clear preferred bit
 			ocf_run tcm_node --clearaluapref="$hbadev" "$ALUA_PTGP" \
