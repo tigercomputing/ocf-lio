@@ -80,8 +80,8 @@ the LIO target implementation allows.
 <parameter name="luns" required="1" unique="0">
 <longdesc lang="en">
 The logical units to create as part of this target. Each logical unit is
-specified as a LUN NAME=LUN ID pair. Separate multiple logical units with spaces. Use
-bash syntax to escape special characters.
+specified as a lun:hba/name triplet. Separate multiple logical units with
+spaces. Use shell syntax to escape special characters.
 </longdesc>
 <shortdesc lang="en">Logical Units</shortdesc>
 <content type="string" />
@@ -127,10 +127,11 @@ find_hbadev()
     local hba
     local hbadev
 
-    #FIXME: hard coded to look for iblock right now
+    local hba_type="${1%%/*}"
+    local lun_name="${1#*/}"
 
     # list all HBAs of the configured type
-    hba_list=$(ls -1 $TCM_SYSFS | egrep "^iblock_[0-9]+$")
+    hba_list=$(ls -1 $TCM_SYSFS | egrep "^${hba_type}_[0-9]+$")
 
     for hba in $hba_list; do
         hbadev="${hba}/${lun_name}"
@@ -201,18 +202,20 @@ iscsi_start()
     ## FIXME: add support for params
     
     for lun in ${OCF_RESKEY_luns}; do
-        lun_name=${lun%%=*}
-        lun_id=${lun#*=}
+        lun_id="${lun%%:*}"
+        lun_hbaname="${lun#*:}"
 
-        hbadev=$(find_hbadev)
+        hbadev=$(find_hbadev "$lun_hbaname")
 
         if [ -z "$hbadev" ]; then
             ocf_log err "HBA device does not exist"
             return $OCF_ERR_GENERIC
         fi
 
-        ocf_run lio_node --addlun=${OCF_RESKEY_iqn} 1 ${lun_id} \
-            ${lun_name} ${hbadev} || return $OCF_ERR_GENERIC
+        ocf_log info "lun=${lun} id=${lun_id} hbaname=${lun_hbaname} hbadev=${hbadev}"
+
+        ocf_run lio_node --addlun=${OCF_RESKEY_iqn} 1 ${lun_id} lun${lun_id} \
+            ${hbadev} || return $OCF_ERR_GENERIC
                 for initiator in ${OCF_RESKEY_initiators}; do
                     ocf_run lio_node --addlunacl=${OCF_RESKEY_iqn} 1 \
                         ${initiator} ${lun_id} ${lun_id} || return $OCF_ERR_GENERIC
