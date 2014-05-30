@@ -27,6 +27,7 @@ TCM_SYSFS=/sys/kernel/config/target/core
 HBA_MAX=255 # arbitrary high limit
 MULTISTATE=0 # set from backstore_validate_all()
 ALUA_PTGP=default_tg_pt_gp
+LOCKFILE="${HA_RSCTMP}/${OCF_RESOURCE_TYPE}.lock"
 
 ################################################################################
 
@@ -295,6 +296,11 @@ backstore_start()
 		fi
 	fi
 
+	# Take a lock so other starting backstores don't race with us and end up
+	# with the same HBA instance
+	ocf_take_lock $LOCKFILE
+	ocf_release_lock_on_exit $LOCKFILE
+
 	# Find a free HBA number
 	for idx in $(seq 0 $HBA_MAX); do
 		hba="${OCF_RESKEY_hba_type}_${idx}"
@@ -313,6 +319,9 @@ backstore_start()
 	# Create the HBA and LUN inside it
 	ocf_run tcm_node --establishdev "$hbadev" "$OCF_RESKEY_device"; rc=$?
 	[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
+
+	# At this point we no longer need the lock
+	rm -f $LOCKFILE
 
 	# Set the unit serial number
 	ocf_run tcm_node --setunitserialwithmd "$hbadev" "$OCF_RESKEY_unit_serial"; rc=$?
