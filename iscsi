@@ -64,7 +64,7 @@ iSCSI network portal addresses. if unset, the default is
 to create a portal that listens on ${OCF_RESKEY_portals_default}.
 </longdesc>
 <shortdesc lang="en">iSCSI Portal addresses</shortdesc>
-<content type="string" default="{OCF_RESKEY_portals_default}"/>
+<content type="string" default="${OCF_RESKEY_portals_default}"/>
 </parameter>
 
 <parameter name="initiators" required="1" unique="0">
@@ -200,7 +200,7 @@ iscsi_start()
     ocf_run lio_node --disableauth ${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
 
     ## FIXME: add support for params
-    
+
     for lun in ${OCF_RESKEY_luns}; do
         lun_id="${lun%%:*}"
         lun_hbaname="${lun#*:}"
@@ -211,8 +211,6 @@ iscsi_start()
             ocf_log err "HBA device does not exist"
             return $OCF_ERR_GENERIC
         fi
-
-        ocf_log info "lun=${lun} id=${lun_id} hbaname=${lun_hbaname} hbadev=${hbadev}"
 
         ocf_run lio_node --addlun=${OCF_RESKEY_iqn} 1 ${lun_id} lun${lun_id} \
             ${hbadev} || return $OCF_ERR_GENERIC
@@ -243,7 +241,7 @@ iscsi_stop()
             ocf_run lio_node --disabletpg=${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
         fi
     fi
-    
+
     ## remove acls from each initiator for target port group
     ## remove LUN ACLs first then node ACLs
     if [ -d "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1/acls" ]; then
@@ -271,7 +269,7 @@ iscsi_stop()
     if [ -d "${ISCSI}/${OCF_RESKEY_iqn}/tpgt_1" ]; then
         ocf_run lio_node --deltpg=${OCF_RESKEY_iqn} 1 || return $OCF_ERR_GENERIC
     fi
-      
+
     ## remove IQN
     if [ -d "${ISCSI}/${OCF_RESKEY_iqn}" ]; then
         ocf_run lio_node --deliqn=${OCF_RESKEY_iqn} || return $OCF_ERR_GENERIC
