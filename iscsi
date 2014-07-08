@@ -32,6 +32,10 @@ ISCSI=/sys/kernel/config/target/iscsi
 OCF_RESKEY_portals_default="0.0.0.0:3260"
 : ${OCF_RESKEY_portals=${OCF_RESKEY_portals_default}}
 
+# Default ALUA target port group is default_tg_pt_gp
+OCF_RESKEY_alua_tpg_default="default_tg_pt_gp"
+: ${OCF_RESKEY_alua_tpg=${OCF_RESKEY_alua_tpg_default}}
+
 iscsi_meta_data()
 {
     cat <<END
@@ -85,6 +89,15 @@ spaces. Use shell syntax to escape special characters.
 </longdesc>
 <shortdesc lang="en">Logical Units</shortdesc>
 <content type="string" />
+</parameter>
+
+<parameter name="alua_tpg" required="0" unique="0">
+<longdesc lang="en">
+ALUA Target Port Group to set on all exported LUNs via this RA. The string 
+"@hostname@" in the TPG name will be replaced with the current node's hostname.
+</longdesc>
+<shortdesc lang="en">ALUA Target Port Group</shortdesc>
+<content type="string" default="${OCF_RESKEY_alua_tpg_default}"/>
 </parameter>
 
 </parameters>
@@ -214,10 +227,20 @@ iscsi_start()
 
         ocf_run lio_node --addlun=${OCF_RESKEY_iqn} 1 ${lun_id} lun${lun_id} \
             ${hbadev} || return $OCF_ERR_GENERIC
-                for initiator in ${OCF_RESKEY_initiators}; do
-                    ocf_run lio_node --addlunacl=${OCF_RESKEY_iqn} 1 \
-                        ${initiator} ${lun_id} ${lun_id} || return $OCF_ERR_GENERIC
-                done
+
+        if [ "$OCF_RESKEY_alua_tpg" != "$OCF_RESKEY_alua_tpg_default" ]; then
+            # Replace @hostname@ with our short hostname
+            OCF_RESKEY_alua_tpg="$(echo "$OCF_RESKEY_alua_tpg" | \
+                sed "s/@hostname@/$(hostname -s)/g")"
+
+            ocf_run lio_node --setaluatpg=${OCF_RESKEY_iqn} 1 ${lun_id} \
+                "$OCF_RESKEY_alua_tpg" || return $OCF_ERR_GENERIC
+        fi
+
+        for initiator in ${OCF_RESKEY_initiators}; do
+            ocf_run lio_node --addlunacl=${OCF_RESKEY_iqn} 1 \
+                ${initiator} ${lun_id} ${lun_id} || return $OCF_ERR_GENERIC
+        done
     done
 
     ## Enable TPG group after LUNS are enabled.
