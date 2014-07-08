@@ -186,6 +186,33 @@ get_alua()
 	cat "${TCM_SYSFS}/${hbadev}/alua/${ALUA_PTGP}/${prop}"
 }
 
+update_master_score()
+{
+	local hbadev="$1"
+
+	# Try to find an HBA containing this device
+	if [ -z "$hbadev" ]; then
+		hbadev=$(find_hbadev)
+		if [ -z "$hbadev" ]; then
+			remove_master_score
+			return 1
+		fi
+	fi
+
+	# Count how many targets refer to us
+	local num_tgt="$(get_alua "$hbadev" members | wc -l)"
+
+	# Calculate our score
+	local score=$(( $num_tgt * 1000 ))
+
+    ocf_log info "setting master score to $score"
+    if [ $score -gt 0 ]; then
+        set_master_score $score
+    else
+        remove_master_score
+    fi
+}
+
 set_master_score()
 {
 	# Use quiet mode (-Q) to quench logging. Actual score updates
@@ -263,7 +290,7 @@ backstore_monitor()
 
 	case $rc in
 	$OCF_SUCCESS|$OCF_RUNNING_MASTER)
-		set_master_score 1000
+		update_master_score
 		;;
 	$OCF_NOT_RUNNING)
 		remove_master_score
@@ -378,7 +405,7 @@ backstore_start()
 		[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 	done
 
-	[ $MULTISTATE -eq 1 ] && set_master_score 1000
+	[ $MULTISTATE -eq 1 ] && update_master_score
 
 	return $OCF_SUCCESS
 }
