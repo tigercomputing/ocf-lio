@@ -27,6 +27,7 @@ TCM_SYSFS=/sys/kernel/config/target/core
 HBA_MAX=255 # arbitrary high limit
 MULTISTATE=0 # set from backstore_validate_all()
 ALUA_PTGP=default_tg_pt_gp
+ALUA_PTGP_ID=0
 LOCKFILE="${HA_RSCTMP}/${OCF_RESOURCE_TYPE}.lock"
 
 ################################################################################
@@ -104,6 +105,18 @@ will use default values set in the kernel.
 </longdesc>
 <shortdesc lang="en">
 Backing store attributes
+</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="alua_hosts" unique="0" required="0">
+<longdesc lang="en">
+This attribute is required when running in multistate mode and ignored
+otherwise. It is a space separated list of hostnames that this resource might
+run on, which is used to generate consistent ALUA port group IDs.
+</longdesc>
+<shortdesc lang="en">
+List of hosts this resource may run on
 </shortdesc>
 <content type="string" />
 </parameter>
@@ -205,12 +218,12 @@ update_master_score()
 	# Calculate our score
 	local score=$(( $num_tgt * 1000 ))
 
-    ocf_log info "setting master score to $score"
-    if [ $score -gt 0 ]; then
-        set_master_score $score
-    else
-        remove_master_score
-    fi
+	ocf_log info "setting master score to $score"
+	if [ $score -gt 0 ]; then
+		set_master_score $score
+	else
+		remove_master_score
+	fi
 }
 
 set_master_score()
@@ -306,7 +319,6 @@ backstore_start()
 	local hba_idx
 	local hba
 	local hbadev
-	local ptgp_id=0
 	local attr
 
 	# Check if we have anything to do
@@ -357,11 +369,8 @@ backstore_start()
 	[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 
 	# Establish ALUA Target Port Group
-	if [ $MULTISTATE -ne 0 ]; then
-		ptgp_id=$((${OCF_RESOURCE_INSTANCE#*:} + 16))
-	fi
 	ocf_run tcm_node --addaluatpgwithmd \
-		"$hbadev" "$ALUA_PTGP" "$ptgp_id"; rc=$?
+		"$hbadev" "$ALUA_PTGP" "$ALUA_PTGP_ID"; rc=$?
 	[ $rc -eq 0 ] || return $OCF_ERR_GENERIC
 
 	if [ $MULTISTATE -eq 0 ]; then
@@ -587,12 +596,32 @@ backstore_validate_all()
 			return $OCF_ERR_CONFIGURED
 		fi
 
-		ocf_log debug "Running as a multi-state resource"
-		MULTISTATE=1
+		if [ -z "$OCF_RESKEY_alua_hosts" ]; then
+			ocf_log err "alua_hosts parameter required for multistate resources"
+			return $OCF_ERR_CONFIGURED
+		fi
 
 		# Concoct an ALUA port group name and ID from our hostname and
 		# resource instance number
 		ALUA_PTGP="$(hostname -s)"
+
+		local id=16
+		local host
+		for host in $OCF_RESKEY_alua_hosts; do
+			if [ "$host" = "$ALUA_PTGP" ]; then
+				ALUA_PTGP_ID=$id
+				break
+			fi
+			id=$(($id + 1))
+		done
+
+		if [ $ALUA_PTGP_ID -eq 0 ]; then
+			ocf_log err "alua_hosts does not include $ALUA_PTGP"
+			return $OCF_ERR_CONFIGURED
+		fi
+
+		ocf_log debug "Running as a multi-state resource"
+		MULTISTATE=1
 	fi
 
 	# ensure ALUA and PR state directories exist
